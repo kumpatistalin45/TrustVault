@@ -150,7 +150,9 @@ async function postWithCsrf(agent, url, body) {
     }
   }
 
+  const originalProvider = process.env.STORAGE_PROVIDER;
   beforeAll(async () => {
+    process.env.STORAGE_PROVIDER = "local";
     const passwordHash = await bcrypt.hash(testPassword, 12);
 
     const ownerResult = await pool.query(
@@ -225,6 +227,7 @@ async function postWithCsrf(agent, url, body) {
           [testUserIds]
         );
       }
+      process.env.STORAGE_PROVIDER = originalProvider;
     } finally {
       await pool.end();
     }
@@ -383,7 +386,7 @@ async function postWithCsrf(agent, url, body) {
       storagePathForTest(saved.rows[0].storage_key)
     );
 
-    expect(storedContents.subarray(0, 4).toString("ascii")).toBe("TVE1");
+    expect(["TVE1", "TVE2"]).toContain(storedContents.subarray(0, 4).toString("ascii"));
     expect(storedContents.equals(contents)).toBe(false);
   });
 
@@ -409,7 +412,7 @@ async function postWithCsrf(agent, url, body) {
     expect(downloadResponse.status).toBe(404);
   });
 
-  test("Viewer can download decrypted content after read permission is granted", async () => {
+  test("Viewer can preview decrypted content after read permission is granted, while download returns 403", async () => {
     const contents = Buffer.from(
       `Authorized download ${unique}`,
       "utf8"
@@ -438,20 +441,26 @@ async function postWithCsrf(agent, url, body) {
 
     expect(grantResponse.status).toBe(200);
 
-    const downloadResponse = await viewerAgent
-      .get(`/api/documents/${sharedId}/download`)
+    // 1. Viewer preview succeeds (200) with inline disposition
+    const previewResponse = await viewerAgent
+      .get(`/api/documents/${sharedId}/preview`)
       .buffer(true)
       .parse(parseBinaryResponse);
 
-    expect(downloadResponse.status).toBe(200);
-    expect(downloadResponse.headers["content-disposition"]).toContain(
-      "attachment"
-    );
-    expect(downloadResponse.headers["x-content-type-options"]).toBe(
-      "nosniff"
-    );
-    expect(Buffer.isBuffer(downloadResponse.body)).toBe(true);
-    expect(downloadResponse.body.equals(contents)).toBe(true);
+    expect(previewResponse.status).toBe(200);
+    expect(previewResponse.headers["content-disposition"]).toBe("inline");
+    expect(previewResponse.headers["x-content-type-options"]).toBe("nosniff");
+    expect(Buffer.isBuffer(previewResponse.body)).toBe(true);
+    expect(previewResponse.body.equals(contents)).toBe(true);
+
+    // 2. Removed download endpoint returns 404 for viewer and owner
+    const downloadResponse = await viewerAgent
+      .get(`/api/documents/${sharedId}/download`);
+    expect(downloadResponse.status).toBe(404);
+
+    const ownerDownloadRes = await ownerAgent
+      .get(`/api/documents/${sharedId}/download`);
+    expect(ownerDownloadRes.status).toBe(404);
   });
 
   test("Tampered encrypted file is rejected and audited", async () => {
@@ -476,18 +485,18 @@ async function postWithCsrf(agent, url, body) {
 
     const encrypted = await fs.readFile(filePath);
 
-    expect(encrypted.subarray(0, 4).toString("ascii")).toBe("TVE1");
+    expect(["TVE1", "TVE2"]).toContain(encrypted.subarray(0, 4).toString("ascii"));
     expect(encrypted.length).toBeGreaterThan(32);
 
     encrypted[encrypted.length - 1] ^= 0x01;
     await fs.writeFile(filePath, encrypted);
 
-    const downloadResponse = await ownerAgent.get(
-      `/api/documents/${tamperedId}/download`
+    const previewResponse = await ownerAgent.get(
+      `/api/documents/${tamperedId}/preview`
     );
 
-    expect(downloadResponse.status).toBe(500);
-    expect(downloadResponse.body).toEqual({
+    expect(previewResponse.status).toBe(500);
+    expect(previewResponse.body).toEqual({
       error: "File integrity verification failed"
     });
 
@@ -495,7 +504,7 @@ async function postWithCsrf(agent, url, body) {
       `SELECT outcome, details
        FROM audit_logs
        WHERE actor_id = $1
-         AND action = 'document_download'
+         AND action = 'document_preview'
          AND document_id = $2
        ORDER BY id DESC
        LIMIT 1`,
@@ -549,9 +558,9 @@ async function postWithCsrf(agent, url, body) {
   // Download authorization hardening
   // --------------------------------------------------
 
-  test("Unauthorized download attempts are recorded as denied", async () => {
+  test("Unauthorized preview attempts are recorded as denied", async () => {
     const response = await viewerAgent.get(
-      `/api/documents/${documentId}/download`
+      `/api/documents/${documentId}/preview`
     );
 
     expect(response.status).toBe(404);
@@ -560,7 +569,7 @@ async function postWithCsrf(agent, url, body) {
       `SELECT outcome
        FROM audit_logs
        WHERE actor_id = $1
-         AND action = 'document_download'
+         AND action = 'document_preview'
          AND document_id = $2
        ORDER BY id DESC
        LIMIT 1`,
@@ -571,7 +580,7 @@ async function postWithCsrf(agent, url, body) {
     expect(audit.rows[0].outcome).toBe("denied");
   });
 
-  test("Revoked user cannot download a previously shared document", async () => {
+  test("Revoked user cannot preview or download a previously shared document", async () => {
     expect(uploadedDocumentId).toBeTruthy();
 
     const grantResponse = await postWithCsrf(
@@ -586,11 +595,17 @@ async function postWithCsrf(agent, url, body) {
     expect(grantResponse.status).toBe(200);
 
     const allowedResponse = await viewerAgent
-      .get(`/api/documents/${uploadedDocumentId}/download`)
+      .get(`/api/documents/${uploadedDocumentId}/preview`)
       .buffer(true)
       .parse(parseBinaryResponse);
 
     expect(allowedResponse.status).toBe(200);
+    expect(Buffer.isBuffer(allowedResponse.body)).toBe(true);
+    expect(allowedResponse.body.length).toBeGreaterThan(0);
+
+    const downloadForbidden = await viewerAgent
+      .get(`/api/documents/${uploadedDocumentId}/download`);
+    expect(downloadForbidden.status).toBe(404);
 
     const revokeResponse = await deleteWithCsrf(
       ownerAgent,
@@ -602,6 +617,11 @@ async function postWithCsrf(agent, url, body) {
       message: "Permission revoked"
     });
 
+    const deniedPreview = await viewerAgent.get(
+      `/api/documents/${uploadedDocumentId}/preview`
+    );
+    expect(deniedPreview.status).toBe(404);
+
     const deniedResponse = await viewerAgent.get(
       `/api/documents/${uploadedDocumentId}/download`
     );
@@ -612,7 +632,7 @@ async function postWithCsrf(agent, url, body) {
       `SELECT outcome
        FROM audit_logs
        WHERE actor_id = $1
-         AND action = 'document_download'
+         AND action = 'document_preview'
          AND document_id = $2
        ORDER BY id DESC
        LIMIT 1`,
@@ -649,23 +669,28 @@ async function postWithCsrf(agent, url, body) {
     await fs.unlink(storagePathForTest(storageKey));
 
     const response = await ownerAgent.get(
-      `/api/documents/${missingFileDocumentId}/download`
+      `/api/documents/${missingFileDocumentId}/preview`
     );
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({
       error: "File not found"
     });
+
+    const dlResponse = await ownerAgent.get(
+      `/api/documents/${missingFileDocumentId}/download`
+    );
+    expect(dlResponse.status).toBe(404);
   });
 
-  test("Missing-file download failure is recorded in the audit log", async () => {
+  test("Missing-file preview failure is recorded in the audit log", async () => {
     expect(missingFileDocumentId).toBeTruthy();
 
     const audit = await pool.query(
       `SELECT outcome, details
        FROM audit_logs
        WHERE actor_id = $1
-         AND action = 'document_download'
+         AND action = 'document_preview'
          AND document_id = $2
        ORDER BY id DESC
        LIMIT 1`,

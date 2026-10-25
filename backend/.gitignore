@@ -2,6 +2,13 @@ node_modules/
 .env
 .env.*
 !.env.example
+*serviceAccount*.json
+*service-account*.json
+*.pem
+*.key
 audit-report.json
 coverage/
 uploads/
+storage/*
+!storage/.gitkeep
+*.log
