@@ -40,8 +40,9 @@ export function AuthProvider({ children }) {
   });
   const [termsLoading, setTermsLoading] = useState(false);
 
-  // Default to connected/live backend mode. Only use mock if explicitly configured.
+  // Default to connected/live backend mode. In production, mock mode is permanently disabled.
   const [isMockMode, setIsMockMode] = useState(() => {
+    if (import.meta.env?.PROD) return false;
     const val = localStorage.getItem("tv_mock_mode");
     if (val === "true") return true;
     if (val === "false") return false;
@@ -302,6 +303,10 @@ export function AuthProvider({ children }) {
   };
 
   const toggleMockMode = (enabled) => {
+    if (import.meta.env?.PROD) {
+      console.warn("Mock mode cannot be enabled in production environments.");
+      return;
+    }
     setIsMockMode(enabled);
     localStorage.setItem("tv_mock_mode", enabled ? "true" : "false");
     if (enabled) {

@@ -122,8 +122,12 @@ app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
 const isProduction = process.env.NODE_ENV === "production";
-const frontendOrigin =
-  process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((o) => o.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
+const frontendOrigin = allowedOrigins[0] || "http://localhost:5173";
+const cookieSameSite = process.env.COOKIE_SAMESITE || (isProduction && process.env.CROSS_ORIGIN_COOKIES === "true" ? "none" : "lax");
 
 validateEmailConfig(isProduction);
 if (process.env.NODE_ENV !== "test" && isEmailConfigured()) {
@@ -350,7 +354,11 @@ app.use(helmet());
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || origin === frontendOrigin) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      const normalizedOrigin = origin.replace(/\/+$/, "");
+      if (allowedOrigins.includes(normalizedOrigin)) {
         return callback(null, true);
       }
 
@@ -406,7 +414,7 @@ app.use(
     cookie: {
       httpOnly: true,
       secure: isProduction,
-      sameSite: "lax",
+      sameSite: cookieSameSite,
       maxAge: 15 * 60 * 1000,
       path: "/"
     }
@@ -516,7 +524,7 @@ const {
   cookieOptions: {
     httpOnly: true,
     secure: isProduction,
-    sameSite: "lax",
+    sameSite: cookieSameSite,
     path: "/"
   },
   size: 64,
@@ -2144,7 +2152,7 @@ app.post("/api/auth/email-link/send", emailLinkSendLimiter, async (req, res, nex
     );
 
     // Generate Firebase sign-in link via Admin SDK (embeds rawToken in continuation URL)
-    const frontendOriginForLink = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+    const frontendOriginForLink = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim().replace(/\/+$/, "");
     const continueUrl = `${frontendOriginForLink}/login/callback`;
 
     let signInLink;
@@ -2298,7 +2306,7 @@ app.post("/api/auth/email-link/regenerate", emailLinkSendLimiter, async (req, re
     );
 
     // Generate new Firebase sign-in link
-    const frontendOriginForLink = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+    const frontendOriginForLink = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim().replace(/\/+$/, "");
     const continueUrl = `${frontendOriginForLink}/login/callback`;
 
     let signInLink;
@@ -6815,10 +6823,11 @@ app.use((error, req, res, _next) => {
 // --------------------------------------------------
 
 if (require.main === module) {
-  const port = Number(process.env.PORT || 3000);
+  const port = Number(process.env.PORT || 5000);
+  const host = process.env.HOST || "0.0.0.0";
 
-  app.listen(port, () => {
-    console.log(`TrustVault API listening on port ${port}`);
+  app.listen(port, host, () => {
+    console.log(`TrustVault API listening on http://${host}:${port}`);
   });
 }
 

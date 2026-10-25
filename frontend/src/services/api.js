@@ -23,7 +23,27 @@ export let adminUsersList = [...MOCK_USERS_LIST];
 export let adminComplaintsList = [...MOCK_ADMIN_COMPLAINTS];
 export let adminPermissionHistory = [...MOCK_PERMISSION_HISTORY];
 
+export const API_BASE_URL = (import.meta.env?.VITE_API_URL || "").trim().replace(/\/+$/, "");
+
+export function formatApiUrl(endpoint) {
+  if (!endpoint) return endpoint;
+  if (/^https?:\/\//i.test(endpoint)) {
+    return endpoint;
+  }
+  if (!API_BASE_URL) {
+    return endpoint;
+  }
+  const cleanPath = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  return `${API_BASE_URL}${cleanPath}`;
+}
+
 export function isMockActive() {
+  // In production builds, mock mode is strictly and permanently disabled.
+  // The application must never silently fall back to mock data in production.
+  if (import.meta.env?.PROD) {
+    return false;
+  }
+
   if (typeof window === "undefined") return false;
   const val = localStorage.getItem("tv_mock_mode");
   if (val === "true") return true;
@@ -32,11 +52,6 @@ export function isMockActive() {
   // In automated test environments (Vitest), mock mode is enabled so unit tests don't require live backend
   if (import.meta.env?.MODE === "test" || import.meta.env?.VITEST) {
     return true;
-  }
-
-  // In production builds and default dev, mock mode is disabled to connect to live backend
-  if (import.meta.env?.PROD) {
-    return false;
   }
 
   return import.meta.env?.VITE_USE_MOCK === "true";
@@ -59,7 +74,7 @@ export async function fetchCsrfToken() {
     return cachedCsrfToken;
   }
   try {
-    const res = await fetch("/api/auth/csrf-token", {
+    const res = await fetch(formatApiUrl("/api/auth/csrf-token"), {
       method: "GET",
       credentials: "include"
     });
@@ -113,7 +128,8 @@ export async function request(url, options = {}) {
     credentials: "include"
   };
 
-  const response = await fetch(url, config);
+  const targetUrl = formatApiUrl(url);
+  const response = await fetch(targetUrl, config);
 
   // If 403 CSRF token error occurs, try refreshing token once and retrying
   if (response.status === 403 && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
@@ -122,7 +138,7 @@ export async function request(url, options = {}) {
       const freshToken = await fetchCsrfToken();
       if (freshToken) {
         headers["X-CSRF-Token"] = freshToken;
-        return fetch(url, { ...config, headers });
+        return fetch(targetUrl, { ...config, headers });
       }
     }
   }

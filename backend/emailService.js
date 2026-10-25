@@ -302,7 +302,7 @@ async function sendPasswordResetEmail({ to, rawToken }) {
     throw new Error("Email delivery service is not configured");
   }
 
-  const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+  const frontendOrigin = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim();
   const resetUrl = `${frontendOrigin.replace(/\/+$/, "")}/reset-password?token=${encodeURIComponent(rawToken)}`;
   const from = process.env.EMAIL_FROM || "TrustVault Security <no-reply@trustvault.internal>";
 
