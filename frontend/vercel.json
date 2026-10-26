@@ -1,6 +1,18 @@
 {
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "https://trust-vault-835n.vercel.app/api/$1"
+    },
+    {
+      "source": "/health",
+      "destination": "https://trust-vault-835n.vercel.app/health"
+    },
+    {
+      "source": "/health/ready",
+      "destination": "https://trust-vault-835n.vercel.app/health/ready"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

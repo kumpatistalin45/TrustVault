@@ -68,6 +68,59 @@ export function shouldFallbackToMock() {
   return isMockActive();
 }
 
+/**
+ * Safely parses response as JSON, checking content-type and catching non-JSON payloads (e.g. HTML 404/500/SPA rewrites).
+ * Reports HTTP status and actionable error messages instead of throwing:
+ * "Unexpected token '<', "<!doctype "... is not valid JSON"
+ */
+export async function safeParseJson(response, fallbackContext = "API response") {
+  if (!response) return null;
+  const contentType = (response.headers?.get("content-type") || "").toLowerCase();
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (readErr) {
+    throw new Error(`Failed to read response from ${fallbackContext}: ${readErr.message}`);
+  }
+
+  // Fast path for valid JSON
+  if (contentType.includes("application/json") || text.trim().startsWith("{") || text.trim().startsWith("[")) {
+    try {
+      return JSON.parse(text);
+    } catch (_parseErr) {
+      // Fall through to error inspection
+    }
+  }
+
+  // Detect HTML responses (e.g., <!DOCTYPE html> from SPA catch-all router or gateway error page)
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<") || contentType.includes("text/html")) {
+    const error = new Error(
+      `Received HTML (HTTP ${response.status}) instead of JSON from ${fallbackContext}. Check that VITE_API_URL targets the backend API and backend routing is configured.`
+    );
+    error.status = response.status;
+    error.isHtmlResponse = true;
+    error.rawResponse = trimmed.slice(0, 160);
+    throw error;
+  }
+
+  // Empty response
+  if (!trimmed) {
+    return null;
+  }
+
+  // Plaintext or other non-JSON
+  try {
+    return JSON.parse(text);
+  } catch (_e) {
+    const error = new Error(
+      `Received non-JSON response (HTTP ${response.status}) from ${fallbackContext}: ${trimmed.slice(0, 120)}`
+    );
+    error.status = response.status;
+    throw error;
+  }
+}
+
 export async function fetchCsrfToken() {
   if (isMockActive()) {
     cachedCsrfToken = "mock-csrf-token-offline";
@@ -78,11 +131,8 @@ export async function fetchCsrfToken() {
       method: "GET",
       credentials: "include"
     });
-    if (!res.ok) {
-      throw new Error(`Failed to fetch CSRF token: ${res.status}`);
-    }
-    const data = await res.json();
-    cachedCsrfToken = data.csrfToken;
+    const data = await handleJsonResponse(res, "CSRF endpoint (/api/auth/csrf-token)");
+    cachedCsrfToken = data?.csrfToken || null;
     return cachedCsrfToken;
   } catch (error) {
     if (!shouldFallbackToMock()) {
@@ -133,33 +183,42 @@ export async function request(url, options = {}) {
 
   // If 403 CSRF token error occurs, try refreshing token once and retrying
   if (response.status === 403 && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
-    const errorJson = await response.clone().json().catch(() => null);
-    if (errorJson?.error === "Invalid CSRF token") {
-      const freshToken = await fetchCsrfToken();
-      if (freshToken) {
-        headers["X-CSRF-Token"] = freshToken;
-        return fetch(targetUrl, { ...config, headers });
+    try {
+      const clone = response.clone();
+      const errorJson = await safeParseJson(clone, "CSRF retry check").catch(() => null);
+      if (errorJson?.error === "Invalid CSRF token") {
+        const freshToken = await fetchCsrfToken();
+        if (freshToken) {
+          headers["X-CSRF-Token"] = freshToken;
+          return fetch(targetUrl, { ...config, headers });
+        }
       }
-    }
+    } catch (_ignore) {}
   }
 
   return response;
 }
 
-export async function handleJsonResponse(response) {
-  let data;
+export async function handleJsonResponse(response, context = "API request") {
+  let data = null;
+  let parseError = null;
+
   try {
-    data = await response.json();
-  } catch (_e) {
-    data = null;
+    data = await safeParseJson(response, context);
+  } catch (err) {
+    parseError = err;
   }
 
   if (!response.ok) {
-    const errorMsg = data?.error || `HTTP error ${response.status}`;
+    const errorMsg = data?.error || parseError?.message || `HTTP error ${response.status}`;
     const error = new Error(errorMsg);
     error.status = response.status;
     error.data = data;
     throw error;
+  }
+
+  if (parseError) {
+    throw parseError;
   }
 
   return data;
@@ -746,11 +805,10 @@ export async function apiGetDownloadHistory() {
     try {
       const res = await request("/api/documents/downloads", { method: "GET" });
       if (res.ok) {
-        const data = await res.json();
-        if (data.downloads) return data;
+        const data = await handleJsonResponse(res, "Download history");
+        if (data?.downloads) return data;
       } else if (!shouldFallbackToMock()) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Download history request failed with status ${res.status}`);
+        await handleJsonResponse(res, "Download history");
       }
     } catch (_e) {
       if (!shouldFallbackToMock()) throw _e;
@@ -823,7 +881,7 @@ export async function apiPreviewDocument(id) {
   try {
     const pkgRes = await request(`/api/documents/${id}/preview-package`, { method: "GET" });
     if (pkgRes.ok) {
-      const data = await pkgRes.json();
+      const data = await handleJsonResponse(pkgRes, "Preview package");
       const decryptedBuf = await decryptDocumentInBrowser({
         dekHex: data.dek,
         ivHex: data.iv,
@@ -849,7 +907,7 @@ export async function apiPreviewDocument(id) {
         }
       };
     } else if (pkgRes.status === 403 || pkgRes.status === 401 || pkgRes.status === 404) {
-      const errorJson = await pkgRes.json().catch(() => null);
+      const errorJson = await safeParseJson(pkgRes, "Preview package error").catch(() => null);
       const err = new Error(errorJson?.error || `Preview request denied (${pkgRes.status})`);
       err.status = pkgRes.status;
       err.data = errorJson;
@@ -865,7 +923,7 @@ export async function apiPreviewDocument(id) {
   // 2. Direct preview fallback
   const res = await request(`/api/documents/${id}/preview`, { method: "GET" });
   if (!res.ok) {
-    const errorJson = await res.json().catch(() => null);
+    const errorJson = await safeParseJson(res, "Preview error").catch(() => null);
     const err = new Error(errorJson?.error || `Preview request failed (${res.status})`);
     err.status = res.status;
     err.data = errorJson;
@@ -1205,8 +1263,8 @@ export async function apiGetOwnerActivity(filters = {}) {
     const queryStr = params.toString() ? `?${params.toString()}` : "";
     const res = await request(`/api/documents/activity${queryStr}`, { method: "GET" });
     if (res.ok) {
-      const data = await res.json();
-      return { activity: data.activity || data.logs || [], total: data.total || (data.activity ? data.activity.length : 0) };
+      const data = await handleJsonResponse(res, "Document activity");
+      return { activity: data?.activity || data?.logs || [], total: data?.total || (data?.activity ? data.activity.length : 0) };
     }
   } catch (_e) {
     if (!shouldFallbackToMock()) throw _e;
@@ -2190,11 +2248,7 @@ export async function apiGetAdminKeys() {
   }
 
   const res = await request("/api/admin/keys", { method: "GET" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to load encryption keys");
-  }
-  return res.json();
+  return handleJsonResponse(res, "Admin encryption keys");
 }
 
 export async function apiGetAdminKeyDetails(keyId) {
@@ -2204,11 +2258,7 @@ export async function apiGetAdminKeyDetails(keyId) {
   }
 
   const res = await request(`/api/admin/keys/${keyId}`, { method: "GET" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to load key details");
-  }
-  return res.json();
+  return handleJsonResponse(res, `Admin key details for ${keyId}`);
 }
 
 export async function apiGenerateAdminKey({ name, scope = "document" }) {
@@ -2233,11 +2283,7 @@ export async function apiGenerateAdminKey({ name, scope = "document" }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, scope, confirm: true })
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to generate encryption key");
-  }
-  return res.json();
+  return handleJsonResponse(res, "Generate admin key");
 }
 
 export async function apiRotateAdminKey(keyId, options = {}) {
@@ -2265,11 +2311,7 @@ export async function apiRotateAdminKey(keyId, options = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirm: true, ...options })
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to rotate encryption key");
-  }
-  return res.json();
+  return handleJsonResponse(res, `Rotate admin key ${keyId}`);
 }
 
 export async function apiRevokeAdminKey(keyId, reason = "") {
@@ -2287,11 +2329,7 @@ export async function apiRevokeAdminKey(keyId, reason = "") {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirm: true, reason })
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to revoke encryption key");
-  }
-  return res.json();
+  return handleJsonResponse(res, `Revoke admin key ${keyId}`);
 }
 
 export async function apiGrantDocumentAccess(documentId, viewerId, permission = "read") {
@@ -2300,22 +2338,14 @@ export async function apiGrantDocumentAccess(documentId, viewerId, permission = 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ viewerId, permission })
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to grant document access");
-  }
-  return res.json();
+  return handleJsonResponse(res, `Grant access to document ${documentId}`);
 }
 
 export async function apiRevokeDocumentAccess(documentId, viewerId) {
   const res = await request(`/api/documents/${documentId}/access/${viewerId}`, {
     method: "DELETE"
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || "Failed to revoke document access");
-  }
-  return res.json();
+  return handleJsonResponse(res, `Revoke access to document ${documentId}`);
 }
 
 
