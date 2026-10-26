@@ -55,7 +55,7 @@ TrustVault is an enterprise-grade, zero-trust inspired document management and c
 * **Database**: PostgreSQL 13+ with `pg` connection pool and `connect-pg-simple` session store
 * **Authentication**:
   * **Owner & Viewer**: Firebase Passwordless Email Link Authentication (10-minute expiring links with regenerate and resend cooldown controls)
-  * **Admin**: Protected corporate credentials with bcrypt hashing and public registration lockdown
+  * **Admin**: Protected corporate credentials with bcrypt hashing and public registration lockdown (Login with these credentials --->(username:Admin@trustvault.com)   --->(password:TrustVault@Snovasys#123)) Note:Admin should add the owners by their email addresses and assign the owners and owners should assign the viwers by adding their email address through their cooncern dashboards...then only the dashboards will open
 * **Cryptography**: AES-256-GCM (TVE1 and TVE2 envelopes with unique 12-byte IVs and 16-byte auth tags)
 * **Email Delivery**: Nodemailer SMTP with STARTTLS (smtp.gmail.com:587)
 * **Cloud Storage**: Supabase Storage with local filesystem fallback in development
