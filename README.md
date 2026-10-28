@@ -55,12 +55,40 @@ TrustVault is an enterprise-grade, zero-trust inspired document management and c
 * **Database**: PostgreSQL 13+ with `pg` connection pool and `connect-pg-simple` session store
 * **Authentication**:
   * **Owner & Viewer**: Firebase Passwordless Email Link Authentication (10-minute expiring links with regenerate and resend cooldown controls)
-  * **Admin**: Protected corporate credentials with bcrypt hashing and public registration lockdown (Login with these credentials --->(username:Admin@trustvault.com)   --->(password:TrustVault@Snovasys#123)) Note:Admin should add the owners by their email addresses and assign the owners and owners should assign the viwers by adding their email address through their cooncern dashboards...then only the dashboards will open
+  * **Admin**: Protected corporate credentials with bcrypt hashing and public registration lockdown (Login with these credentials --->
+(username:Admin@trustvault.com)
+(password:TrustVault$Snovasys#3128))
+Note:Admin should add the owners by their email addresses and assign the owners and owners should assign the viwers by adding their email address through their concern dashboards...then only the dashboards will open
 * **Cryptography**: AES-256-GCM (TVE1 and TVE2 envelopes with unique 12-byte IVs and 16-byte auth tags)
 * **Email Delivery**: Nodemailer SMTP with STARTTLS (smtp.gmail.com:587)
 * **Cloud Storage**: Supabase Storage with local filesystem fallback in development
 
----
+###Working flow
+##1. Admin Flowchart
+
+Admin Login → Create Owner Through Email → Assign Project → Manage Owners → View Audit Logs → Log
+
+##2. OWNER FLOW
+
+Owner Login → Access Assigned Project → Upload Documents → Create Viewer Through Email → Assign Document Access → Manage Viewers → Logout
+
+##3. VIEWER FLOW
+
+Viewer Login → View Assigned Documents → Select Document → Verify Permissions → Preview Document / Access Denied → Logout
+
+##4. COMPLETE ROLE HIERARCHY
+
+Admin → Creates Owner Through Email → Assigns Project
+
+Owner → Creates Viewer Through Email → Assigns Document Access
+
+Viewer → Logs In → Views Assigned Documents → Previews Authorized Documents
+
+##5. SECURITY FLOW
+
+Every Request → Authentication Check → Session and CSRF Validation → Role and Permission Verification → Allow or Deny Access → Record Audit Log
+
+Important: Admin can manage Owners, Owners can manage Viewers within their assigned project, and Viewers can preview only authorized documents. Email verification, account activation, and assignment behavior must match the actual application implementation.
 
 ## Project Structure
 
