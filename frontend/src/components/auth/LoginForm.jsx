@@ -24,7 +24,7 @@ export function LoginForm({ onRoleChange, initialRole = "viewer", className = ""
   const [error, setError] = useState("");
 
   // Admin form state (Username & Password)
-  const [adminUsername, setAdminUsername] = useState(initialRole === "admin" ? "Admin@trustvault.com" : "");
+  const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [adminErrors, setAdminErrors] = useState({});
@@ -33,12 +33,6 @@ export function LoginForm({ onRoleChange, initialRole = "viewer", className = ""
     setSelectedRole(role);
     setError("");
     setAdminErrors({});
-
-    if (role === "admin") {
-      if (!adminUsername || adminUsername.includes("trustvault.internal") || adminUsername === "Alex Vance (Admin)") {
-        setAdminUsername("Admin@trustvault.com");
-      }
-    }
 
     if (onRoleChange) {
       onRoleChange(role);
