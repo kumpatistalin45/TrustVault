@@ -3,7 +3,7 @@ const bcrypt = require('bcrypt');
 const pool = require('./db');
 
 async function seed() {
-  const hash = await bcrypt.hash('TrustVault@Snovasys#123', 12);
+  const hash = await bcrypt.hash('TrustVault$Snovasys#3128', 12);
   
   await pool.query(
     `INSERT INTO users (name, email, password_hash, role)

@@ -302,8 +302,9 @@ async function sendPasswordResetEmail({ to, rawToken }) {
     throw new Error("Email delivery service is not configured");
   }
 
-  const frontendOrigin = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim();
-  const resetUrl = `${frontendOrigin.replace(/\/+$/, "")}/reset-password?token=${encodeURIComponent(rawToken)}`;
+  const rawOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",").map((o) => o.trim().replace(/\/+$/, ""));
+  const frontendOrigin = rawOrigins.find((o) => o.includes("trust-vault-nu.vercel.app")) || rawOrigins[0] || "https://trust-vault-nu.vercel.app";
+  const resetUrl = `${frontendOrigin}/reset-password?token=${encodeURIComponent(rawToken)}`;
   const from = process.env.EMAIL_FROM || "TrustVault Security <no-reply@trustvault.internal>";
 
   const mailOptions = {

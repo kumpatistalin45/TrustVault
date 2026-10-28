@@ -30,10 +30,18 @@ export function formatApiUrl(endpoint) {
   if (/^https?:\/\//i.test(endpoint)) {
     return endpoint;
   }
-  if (!API_BASE_URL) {
-    return endpoint;
-  }
   const cleanPath = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+
+  // In production browser environments on Vercel (e.g. trust-vault-nu.vercel.app),
+  // route requests via same-origin relative paths to leverage Vercel rewrites.
+  // This guarantees first-party cookie inclusion across all browsers (including Safari ITP, Brave, Chrome).
+  if (typeof window !== "undefined" && window.location?.hostname?.endsWith(".vercel.app")) {
+    return cleanPath;
+  }
+
+  if (!API_BASE_URL) {
+    return cleanPath;
+  }
   return `${API_BASE_URL}${cleanPath}`;
 }
 
@@ -186,7 +194,11 @@ export async function request(url, options = {}) {
     try {
       const clone = response.clone();
       const errorJson = await safeParseJson(clone, "CSRF retry check").catch(() => null);
-      if (errorJson?.error === "Invalid CSRF token") {
+      if (
+        errorJson?.error === "Invalid CSRF token" ||
+        errorJson?.code === "EBADCSRFTOKEN" ||
+        /csrf/i.test(errorJson?.error || "")
+      ) {
         const freshToken = await fetchCsrfToken();
         if (freshToken) {
           headers["X-CSRF-Token"] = freshToken;

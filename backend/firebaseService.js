@@ -1,6 +1,27 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
+// Intercept CommonJS require('jose') for jwks-rsa in Node.js 22
+const Module = require("module");
+if (!global.__tv_jose_hooked) {
+  global.__tv_jose_hooked = true;
+  const originalLoad = Module._load;
+  global.__tv_jose_promise = import("jose")
+    .then((m) => {
+      global.__tv_jose_module = m;
+    })
+    .catch((err) => {
+      console.warn("[JOSE_DYNAMIC_IMPORT_WARN]", err.message);
+    });
+
+  Module._load = function (request, parent, isMain) {
+    if (request === "jose" && global.__tv_jose_module) {
+      return global.__tv_jose_module;
+    }
+    return originalLoad.apply(this, arguments);
+  };
+}
+
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 
@@ -145,6 +166,12 @@ async function generateFirebaseSignInLink(email, apiToken, continueUrl) {
     throw new Error(
       "Firebase Admin SDK is not configured. Please provide FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in backend/.env"
     );
+  }
+
+  if (!global.__tv_jose_module && global.__tv_jose_promise) {
+    try {
+      await global.__tv_jose_promise;
+    } catch (_e) {}
   }
 
   const { getAuth } = require("firebase-admin/auth");

@@ -1,6 +1,27 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
+// Intercept CommonJS require('jose') for jwks-rsa in Node.js 22
+const Module = require("module");
+if (!global.__tv_jose_hooked) {
+  global.__tv_jose_hooked = true;
+  const originalLoad = Module._load;
+  global.__tv_jose_promise = import("jose")
+    .then((m) => {
+      global.__tv_jose_module = m;
+    })
+    .catch((err) => {
+      console.warn("[JOSE_DYNAMIC_IMPORT_WARN]", err.message);
+    });
+
+  Module._load = function (request, parent, isMain) {
+    if (request === "jose" && global.__tv_jose_module) {
+      return global.__tv_jose_module;
+    }
+    return originalLoad.apply(this, arguments);
+  };
+}
+
 const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
@@ -79,16 +100,31 @@ const {
 } = require("./firebaseService");
 const pool = require("./db");
 
-// Safe Idempotent Schema Migrations Execution on Boot
-for (const migFile of ["001_safe_schema_expansion.sql", "002_master_data_management.sql", "003_secure_key_management.sql", "004_email_link_auth.sql"]) {
-  try {
-    const migrationPath = path.resolve(__dirname, "migrations", migFile);
-    if (fs.existsSync(migrationPath)) {
-      const migrationSql = fs.readFileSync(migrationPath, "utf8");
-      pool.query(migrationSql).catch(() => {});
+// Safe Idempotent Schema and Migrations Execution on Boot
+const schemaBootFiles = [
+  path.resolve(__dirname, "schema.sql"),
+  path.resolve(__dirname, "migrations", "001_safe_schema_expansion.sql"),
+  path.resolve(__dirname, "migrations", "002_master_data_management.sql"),
+  path.resolve(__dirname, "migrations", "003_secure_key_management.sql"),
+  path.resolve(__dirname, "migrations", "004_email_link_auth.sql"),
+  path.resolve(__dirname, "migrations", "005_seed_production_users.sql")
+];
+
+let dbBootPromise = null;
+const runSchemaBoot = async () => {
+  for (const bootFile of schemaBootFiles) {
+    try {
+      if (fs.existsSync(bootFile)) {
+        const sql = fs.readFileSync(bootFile, "utf8");
+        await pool.query(sql);
+        console.log(`[DB_BOOT] Completed: ${path.basename(bootFile)}`);
+      }
+    } catch (bootErr) {
+      console.error(`[DB_BOOT_ERROR] Failed ${path.basename(bootFile)}: ${bootErr.message}`);
     }
-  } catch (_migErr) {}
-}
+  }
+};
+dbBootPromise = runSchemaBoot();
 
 // Background self-destruct cleanup worker (runs every 60s)
 const autoDeleteInterval = setInterval(async () => {
@@ -121,13 +157,27 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 
+app.use(async (req, res, next) => {
+  if (global.__tv_jose_promise && !global.__tv_jose_module) {
+    try {
+      await global.__tv_jose_promise;
+    } catch (_e) {}
+  }
+  if (dbBootPromise) {
+    try {
+      await dbBootPromise;
+    } catch (_bootErr) {}
+  }
+  next();
+});
+
 const isProduction = process.env.NODE_ENV === "production";
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((o) => o.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 const frontendOrigin = allowedOrigins[0] || "http://localhost:5173";
-const cookieSameSite = process.env.COOKIE_SAMESITE || (isProduction && process.env.CROSS_ORIGIN_COOKIES === "true" ? "none" : "lax");
+const cookieSameSite = process.env.COOKIE_SAMESITE || (isProduction ? "none" : "lax");
 
 validateEmailConfig(isProduction);
 if (process.env.NODE_ENV !== "test" && isEmailConfigured()) {
@@ -541,7 +591,7 @@ app.get("/api/auth/csrf-token", (req, res, next) => {
     }
 
     try {
-      const csrfToken = generateCsrfToken(req, res);
+      const csrfToken = generateCsrfToken(req, res, { overwrite: true });
       return res.status(200).json({ csrfToken });
     } catch (error) {
       return next(error);
@@ -752,20 +802,60 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/health/ready", async (_req, res) => {
+  const startTime = Date.now();
+  let client;
   try {
-    await pool.query("SELECT 1");
+    // Acquire a client from the pool with an explicit timeout (5000ms)
+    client = await Promise.race([
+      pool.connect(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Database connection acquisition timed out (5000ms)")), 5000)
+      )
+    ]);
 
-    return res.json({
+    await client.query("SELECT 1");
+    client.release();
+
+    return res.status(200).json({
       status: "ok",
       database: "connected"
     });
-  } catch (_error) {
+  } catch (error) {
+    if (client) {
+      try {
+        client.release(true);
+      } catch (_) {}
+    }
+
+    const rawMsg = error && error.message ? String(error.message) : "Database query failed";
+    const redactedMessage = rawMsg
+      .replace(/:\/\/[^@]+@/g, "://[REDACTED]@")
+      .slice(0, 250);
+
+    const errorCode = error && error.code ? String(error.code) : "DATABASE_UNAVAILABLE";
+    const diag = pool.getSafeDbDiagnostics ? pool.getSafeDbDiagnostics() : {};
+
+    console.error("[HEALTH_READY_DIAGNOSTIC] Database readiness check failed:", {
+      code: errorCode,
+      message: redactedMessage,
+      targetHost: diag.host,
+      targetPort: diag.port,
+      latencyMs: Date.now() - startTime
+    });
+
     return res.status(503).json({
       status: "error",
-      database: "unavailable"
+      database: "unavailable",
+      code: errorCode,
+      message: redactedMessage,
+      target: {
+        host: diag.host || "unresolved",
+        port: diag.port || "5432"
+      }
     });
   }
 });
+
 
 // --------------------------------------------------
 // Registration
@@ -945,6 +1035,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
       : await dummyHashPromise;
 
     const matches = await bcrypt.compare(password, hash);
+    console.log(`[LOGIN_DIAGNOSTIC] identifier=${identifier}, userFound=${Boolean(user)}, userId=${user?.id}, userEmail=${user?.email}, matches=${matches}`);
 
     const isUsernameLogin = Boolean(req.body?.username && !req.body?.email);
 
@@ -1024,7 +1115,7 @@ app.post("/api/auth/login", loginLimiter, async (req, res, next) => {
 
         let csrfToken;
         try {
-          csrfToken = generateCsrfToken(req, res);
+          csrfToken = generateCsrfToken(req, res, { overwrite: true });
         } catch (_csrfError) {
           // Fallback if token generation fails
         }
@@ -1172,7 +1263,7 @@ app.post("/api/auth/firebase-login", loginLimiter, async (req, res, next) => {
 
         let csrfToken;
         try {
-          csrfToken = generateCsrfToken(req, res);
+          csrfToken = generateCsrfToken(req, res, { overwrite: true });
         } catch (_csrfError) {
           // Fallback if token generation fails
         }
@@ -1881,7 +1972,7 @@ app.post("/api/auth/email-otp/verify", otpVerifyLimiter, async (req, res, next) 
 
         let csrfToken;
         try {
-          csrfToken = generateCsrfToken(req, res);
+          csrfToken = generateCsrfToken(req, res, { overwrite: true });
         } catch (_csrfError) {}
 
         return res.json({
@@ -2152,7 +2243,10 @@ app.post("/api/auth/email-link/send", emailLinkSendLimiter, async (req, res, nex
     );
 
     // Generate Firebase sign-in link via Admin SDK (embeds rawToken in continuation URL)
-    const frontendOriginForLink = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim().replace(/\/+$/, "");
+    const frontendOriginForLink = (
+      allowedOrigins.find((o) => o.includes("trust-vault-nu.vercel.app")) ||
+      (isProduction ? "https://trust-vault-nu.vercel.app" : allowedOrigins[0] || "http://localhost:5173")
+    ).trim().replace(/\/+$/, "");
     const continueUrl = `${frontendOriginForLink}/login/callback`;
 
     let signInLink;
@@ -2164,14 +2258,11 @@ app.post("/api/auth/email-link/send", emailLinkSendLimiter, async (req, res, nex
         `UPDATE email_link_tokens SET revoked_at = NOW() WHERE token_hash = $1`,
         [tokenHash]
       );
-      await writeAudit({
-        actorId: user.id,
-        action: "auth_email_link_send",
-        outcome: "failure",
-        details: { reason: `Firebase link generation failed: ${fbErr.message}` }
-      });
+      console.error(`[FIREBASE_LINK_ERROR] Code: ${fbErr.code}, Message: ${fbErr.message}`);
       return res.status(503).json({
-        error: "Unable to send sign-in link. Firebase is not fully configured. Please provide FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in backend/.env, or contact your administrator."
+        error: "Unable to send sign-in link. Firebase error.",
+        reason: fbErr.message,
+        code: fbErr.code || "FIREBASE_ERROR"
       });
     }
 
@@ -2306,7 +2397,10 @@ app.post("/api/auth/email-link/regenerate", emailLinkSendLimiter, async (req, re
     );
 
     // Generate new Firebase sign-in link
-    const frontendOriginForLink = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",")[0].trim().replace(/\/+$/, "");
+    const frontendOriginForLink = (
+      allowedOrigins.find((o) => o.includes("trust-vault-nu.vercel.app")) ||
+      (isProduction ? "https://trust-vault-nu.vercel.app" : allowedOrigins[0] || "http://localhost:5173")
+    ).trim().replace(/\/+$/, "");
     const continueUrl = `${frontendOriginForLink}/login/callback`;
 
     let signInLink;
@@ -2576,7 +2670,7 @@ app.post("/api/auth/email-link/complete", emailLinkCompleteLimiter, async (req, 
 
         let csrfToken;
         try {
-          csrfToken = generateCsrfToken(req, res);
+          csrfToken = generateCsrfToken(req, res, { overwrite: true });
         } catch (_csrfError) {}
 
         return res.json({
@@ -6753,7 +6847,7 @@ app.use((_req, res) => {
 // --------------------------------------------------
 
 app.use((error, req, res, _next) => {
-  if (error === invalidCsrfTokenError) {
+  if (error === invalidCsrfTokenError || error?.code === "EBADCSRFTOKEN" || (error?.status === 403 && /csrf/i.test(error?.message || ""))) {
     return res.status(403).json({
       error: "Invalid CSRF token"
     });
